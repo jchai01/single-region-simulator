@@ -23,6 +23,10 @@ Download as geopackage
 https://gis.teagasc.ie/soils/downloads.php
 Seems to have cert issues when accessing via browser, use:
 
+#### validation data
+
+https://osf.io/v4nsq/
+
 ```bash
 wget --no-check-certificate https://gis.teagasc.ie/soils/downloads/INSM250k_ING_1b.zip
 ```
@@ -39,9 +43,8 @@ Dependencies (running with CUDA version 12.9)
 
 ```bash
 uv pip install torch --index-url https://download.pytorch.org/whl/cu121
-uv pip install torch_geometric pandas pyarrow fastparquet
+uv pip install torch_geometric pandas pyarrow fastparquet pymoo
 
 # Installing pyg-lib and torch-sparse
 uv pip install pyg-lib torch-sparse -f https://data.pyg.org/whl/torch-2.5.0+cu121.html
 ```
-

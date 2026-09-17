@@ -28,6 +28,7 @@ This is a genuinely heavy step -- realistically needs your HPC/GPU
 setup at 1.5M nodes / 5.3M edges, not a laptop CPU run.
 """
 
+import os
 import time
 
 import numpy as np
@@ -76,6 +77,20 @@ def classify_land_cover(row) -> str:
 def build_pyg_data():
     nodes = pd.read_parquet(NODES_PATH)
     edges = pd.read_parquet(EDGES_PATH)
+
+    # Visibility check: which graph version is actually loaded, printed
+    # directly from the training log rather than requiring a separate
+    # check -- this ran into ambiguity more than once before (unclear
+    # whether a stale pre-fix graph_edges.parquet was in use, since
+    # training wall-clock time alone doesn't distinguish the two: fixed
+    # neighbor-sampling fanout in NeighborLoader makes per-epoch cost
+    # largely independent of actual graph density).
+    avg_degree = 2 * len(edges) / len(nodes)
+    print(f"Loaded graph: {len(nodes):,} nodes, {len(edges):,} edges, "
+          f"avg degree {avg_degree:.2f}")
+    print(f"  data/graph_edges.parquet modified: "
+          f"{os.path.getmtime(EDGES_PATH)} (Unix timestamp -- compare "
+          "against your last confirmed build_parcel_graph.py run)")
 
     nodes["land_cover_class"] = nodes.apply(classify_land_cover, axis=1)
     classes = sorted(nodes["land_cover_class"].unique())

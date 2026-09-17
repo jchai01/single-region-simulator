@@ -92,7 +92,56 @@ def load_area_and_baseline():
     return combined
 
 
-def filter_reallocatable(parcel_ids: list[int], combined: gpd.GeoDataFrame) -> list[int]:
+# Heuristic proxy for likely shared/commonage land, NOT a confirmed
+# tenure-type field -- no explicit commonage attribute was found in
+# this pipeline's LPIS-derived columns (crop, tillage_class, Associat_S,
+# etc.). The signature is inferred from one CONFIRMED real example
+# (a 99.84ha Mayo 'Permanent Pasture' parcel, valid single polygon,
+# degree 3,059 -- bordering thousands of individual smallholdings,
+# consistent with large shared upland grazing). An individual farmer's
+# single large field doesn't border hundreds of separate neighbors;
+# only large shared land plausibly does. Thresholds below are a
+# conservative proxy, not a precise boundary -- IF THE RAW LPIS SOURCE
+# HAS AN ACTUAL TENURE-TYPE/COMMONAGE FIELD not yet surfaced through
+# this pipeline, prefer that over this heuristic.
+COMMONAGE_AREA_HA_THRESHOLD = 20.0   # typical LPIS field parcels are well under 10ha
+COMMONAGE_DEGREE_THRESHOLD = 150     # well above the 75th-percentile degree (~7) and
+                                      # the >100-degree population (~2.4% of parcels
+                                      # nationally) -- deliberately conservative so this
+                                      # doesn't over-exclude ordinary large-but-legitimate
+                                      # single-owner fields near dense smallholding clusters.
+
+
+def flag_likely_commonage(parcel_ids: list[int], combined: gpd.GeoDataFrame,
+                          edges_path: str = "data/graph_edges.parquet") -> set[int]:
+    """
+    Returns the subset of parcel_ids matching the commonage heuristic
+    (area > COMMONAGE_AREA_HA_THRESHOLD AND graph degree >
+    COMMONAGE_DEGREE_THRESHOLD). See module-level comment above the
+    threshold constants for what this proxy is standing in for and why.
+    """
+    edges = pd.read_parquet(edges_path)
+    region_set = set(parcel_ids)
+    region_edges = edges[edges["a"].isin(region_set) | edges["b"].isin(region_set)]
+    degree = {}
+    for a, b in zip(region_edges["a"], region_edges["b"]):
+        if a in region_set:
+            degree[a] = degree.get(a, 0) + 1
+        if b in region_set:
+            degree[b] = degree.get(b, 0) + 1
+
+    area_by_pid = dict(zip(combined["parcel_id"], combined.geometry.area / 10_000))
+
+    flagged = {
+        pid for pid in parcel_ids
+        if area_by_pid.get(pid, 0) > COMMONAGE_AREA_HA_THRESHOLD
+        and degree.get(pid, 0) > COMMONAGE_DEGREE_THRESHOLD
+    }
+    return flagged
+
+
+def filter_reallocatable(parcel_ids: list[int], combined: gpd.GeoDataFrame,
+                         exclude_likely_commonage: bool = True) -> list[int]:
     """
     Drops any parcel whose ORIGINAL crop is genuinely immutable
     infrastructure (see IMMUTABLE_CLASSES) from the maskable set --
@@ -100,6 +149,12 @@ def filter_reallocatable(parcel_ids: list[int], combined: gpd.GeoDataFrame) -> l
     of what the generative model might sample for them. They remain
     in the graph as unmasked NEIGHBOR context; they're just never
     themselves a masking target.
+
+    Also excludes likely shared/commonage land (see
+    flag_likely_commonage() -- a heuristic proxy, not a confirmed
+    tenure field) for the same reason immutable infrastructure is
+    excluded: no single reallocation decision can sensibly act on land
+    with no single decision-maker.
     """
     region = combined[combined["parcel_id"].isin(parcel_ids)]
     is_immutable = region["crop"].str.upper().isin(IMMUTABLE_CLASSES)
@@ -108,7 +163,21 @@ def filter_reallocatable(parcel_ids: list[int], combined: gpd.GeoDataFrame) -> l
         print(f"Excluded {n_dropped} immutable-infrastructure parcels "
               f"(buildings/roads/quarries/water) from the reallocation "
               "target set -- these remain as fixed context, not candidates.")
-    return region.loc[~is_immutable, "parcel_id"].tolist()
+    remaining_ids = region.loc[~is_immutable, "parcel_id"].tolist()
+
+    if exclude_likely_commonage:
+        commonage_ids = flag_likely_commonage(remaining_ids, combined)
+        if commonage_ids:
+            print(f"Excluded {len(commonage_ids)} likely shared/commonage "
+                  f"parcel(s) (heuristic: area > {COMMONAGE_AREA_HA_THRESHOLD}ha "
+                  f"AND graph degree > {COMMONAGE_DEGREE_THRESHOLD}) from the "
+                  f"reallocation target set: {sorted(commonage_ids)} -- no single "
+                  "reallocation decision can sensibly act on shared-tenure land. "
+                  "This is a PROXY, not a confirmed tenure field -- verify against "
+                  "the raw LPIS source if one exists.")
+            remaining_ids = [pid for pid in remaining_ids if pid not in commonage_ids]
+
+    return remaining_ids
 
 
 def score_scenario(parcel_ids: list[int], new_classes: dict, combined: gpd.GeoDataFrame,
