@@ -46,12 +46,23 @@ from sample_reallocation import load_model_and_graph, sample_reallocation
 from generate_scenarios import (
     load_area_and_baseline, filter_reallocatable, score_scenario,
 )
+from carbon_time_dynamics import carbon_at_year, YEARS_TO_POLICY_TARGET
 
 
 def build_lookup_tables(parcel_ids, combined, branch_means, branch_stds, per_parcel_labels):
-    """One-time precomputation for vectorized batch evaluation -- see
-    nsga2_vectorized_evaluate.py for the standalone version + correctness
-    check against a reference implementation."""
+    """One-time precomputation for vectorized batch evaluation.
+
+    CARBON IS TIME-RESOLVED, NOT INSTANT-SWAP: padded_carbon_lookup
+    entries are each parcel's carbon stock at YEARS_TO_POLICY_TARGET
+    years after a hypothetical transition to that column's class (via
+    carbon_time_dynamics.carbon_at_year()), computed ONCE here during
+    setup -- NOT per NSGA-II evaluation. This keeps evaluate_batch()'s
+    vectorized fancy-indexing untouched; only the values feeding INTO
+    the lookup table changed, not how the table is used downstream.
+    carbon_at_year() itself handles the no-change case (a column whose
+    class matches the parcel's own original class) by returning the
+    parcel's own baseline directly, not a branch mean.
+    """
     n_var = len(parcel_ids)
     max_domain = max(len(labels) for labels in per_parcel_labels)
 
@@ -68,10 +79,15 @@ def build_lookup_tables(parcel_ids, combined, branch_means, branch_stds, per_par
 
     for p, pid in enumerate(parcel_ids):
         labels = per_parcel_labels[p]
+        source_class = baseline_class_by_pid[pid]
+        baseline_stock = baseline_carbon_per_ha[p]
         for idx, cls in enumerate(labels):
-            padded_carbon_lookup[p, idx] = branch_means[cls]
+            padded_carbon_lookup[p, idx] = carbon_at_year(
+                source_class, cls, baseline_stock, branch_means[cls],
+                YEARS_TO_POLICY_TARGET,
+            )
             padded_std_lookup[p, idx] = branch_stds.get(cls, 0.0)
-        baseline_cls = baseline_class_by_pid[pid]
+        baseline_cls = source_class
         if baseline_cls in labels:
             baseline_idx_per_parcel[p] = labels.index(baseline_cls)
         # else stays -1 (sentinel): baseline class isn't a valid target for
@@ -396,7 +412,7 @@ if __name__ == "__main__":
     all_fronts = {}
     for seed in [1, 2, 3, 4]:
         print(f"\n{'='*20} SEED {seed} {'='*20}")
-        result, pareto_front = run_nsga2_search(parcel_ids, n_generations=200, pop_size=200, seed=seed)
+        result, pareto_front = run_nsga2_search(parcel_ids, n_generations=400, pop_size=600, seed=seed)
         all_fronts[seed] = pareto_front
 
     print(f"\n{'='*20} SUMMARY ACROSS {len(all_fronts)} SEEDS {'='*20}")

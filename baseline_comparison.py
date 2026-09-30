@@ -40,6 +40,7 @@ import numpy as np
 import pandas as pd
 
 from generate_scenarios import load_area_and_baseline, filter_reallocatable, score_scenario
+from carbon_time_dynamics import carbon_at_year, YEARS_TO_POLICY_TARGET
 
 REALISTIC_TARGET_CLASSES = ["tillage", "grassland", "forestry"]
 
@@ -72,14 +73,18 @@ def random_baseline(parcel_ids, combined, branch_means, branch_stds,
 def greedy_baseline(parcel_ids, combined, branch_means, branch_stds, disruption_fraction):
     region = combined[combined["parcel_id"].isin(parcel_ids)].copy()
 
-    # For each parcel, find its single BEST realistic target class
-    # (highest branch-mean carbon among the 3 realistic options) and
-    # the resulting per-ha gain over its current class.
+    # For each parcel, find its single BEST realistic target class and
+    # the resulting per-ha gain, using the SAME time-resolved objective
+    # NSGA-II is scored on (carbon_at_year, not the raw branch-mean
+    # gap) -- otherwise greedy would be ranking its choices by one
+    # objective (eventual gain) while being scored on another (gain
+    # realized by YEARS_TO_POLICY_TARGET), understating the strongest
+    # fair version of this baseline.
     def best_realistic_target(row):
         current = row["land_cover_class"]
-        current_carbon = branch_means.get(current, 0.0)
+        own_baseline = row["carbon_t_c_per_ha_mean"]
         gains = {
-            cls: branch_means[cls] - current_carbon
+            cls: carbon_at_year(current, cls, own_baseline, branch_means[cls], YEARS_TO_POLICY_TARGET) - own_baseline
             for cls in REALISTIC_TARGET_CLASSES if cls != current
         }
         if not gains:

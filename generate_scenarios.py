@@ -35,6 +35,7 @@ import torch
 
 from sample_reallocation import load_model_and_graph, sample_reallocation
 from carbon_transition_delta import compute_branch_means, compute_branch_stds, classify_land_cover
+from carbon_time_dynamics import carbon_at_year, YEARS_TO_POLICY_TARGET
 
 COMBINED_PATH = "data/parcel_yield_carbon.gpkg"
 
@@ -198,12 +199,40 @@ def score_scenario(parcel_ids: list[int], new_classes: dict, combined: gpd.GeoDa
     large sample sizes most branches have). Aggregate variance for a
     SUM of independent terms is the sum of their variances, so:
         total_std = sqrt( sum_i (area_i * branch_std_i)^2 )
+
+    CARBON IS TIME-RESOLVED, NOT INSTANT-SWAP: total_carbon_t reflects
+    each parcel's carbon stock at YEARS_TO_POLICY_TARGET years after
+    reallocation (via carbon_time_dynamics.carbon_at_year()), not an
+    idealized immediate jump to the target class's steady-state value.
+    Only the afforestation transition has a literature-cited trajectory
+    shape; every other transition uses an unsourced placeholder
+    timescale -- see carbon_time_dynamics.py's module docstring. The
+    std above still reflects branch-level spread in the EVENTUAL
+    (steady-state) target value, applied at the policy-year point --
+    a stated simplification, not a rigorously time-resolved
+    uncertainty, since carbon_at_year() itself is deterministic given
+    its inputs.
     """
     region = combined[combined["parcel_id"].isin(parcel_ids)].copy()
     region["new_class"] = region["parcel_id"].map(new_classes)
 
-    # --- Carbon: area-weighted mean AND propagated uncertainty ---
-    region["new_carbon_per_ha"] = region["new_class"].map(branch_carbon_means)
+    # --- Carbon: time-resolved (carbon_at_year), not instant-swap ---
+    # Each parcel's OWN measured baseline (carbon_t_c_per_ha_mean), not
+    # the source branch mean, anchors its trajectory -- carbon_at_year()
+    # itself handles the no-change case (new_class == original class)
+    # by returning baseline_stock directly rather than sliding toward
+    # a branch mean that may differ from this parcel's actual value.
+    def _carbon_at_policy_year(row):
+        target_stock = branch_carbon_means.get(row["new_class"])
+        if target_stock is None or pd.isna(row["carbon_t_c_per_ha_mean"]):
+            return np.nan
+        return carbon_at_year(
+            row["land_cover_class"], row["new_class"],
+            row["carbon_t_c_per_ha_mean"], target_stock,
+            YEARS_TO_POLICY_TARGET,
+        )
+
+    region["new_carbon_per_ha"] = region.apply(_carbon_at_policy_year, axis=1)
     region["new_carbon_std_per_ha"] = region["new_class"].map(branch_carbon_stds)
     total_carbon_t = (region["area_ha"] * region["new_carbon_per_ha"]).sum()
     total_carbon_t_std = np.sqrt(

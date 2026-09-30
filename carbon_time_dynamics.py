@@ -51,6 +51,17 @@ AFFORESTATION_SHAPE_K = 3.0  # ASSUMED default -- see module docstring
 # --- Default timescale for all other (unsourced) transitions ---
 DEFAULT_TIMESCALE_YEARS = 20.0  # ASSUMED, UNSOURCED placeholder -- see docstring
 
+# --- Shared policy horizon ---
+# Defined HERE, once, so every consumer (generate_scenarios.py's
+# score_scenario(), nsga2_scenario_search.py's build_lookup_tables())
+# imports the SAME value rather than each hardcoding its own copy that
+# could silently drift out of sync -- exactly the failure mode that
+# would make a baseline-vs-NSGA-II comparison apples-to-oranges.
+# 25 years is a round-number approximation (today is 2026; adjust this
+# to years-remaining-to-your-actual-target-year, e.g. 2050, if that's
+# more precise than the round number).
+YEARS_TO_POLICY_TARGET = 25
+
 
 def _gamma_scale_for_mode(mode: float, shape_k: float) -> float:
     """theta such that the Gamma(shape_k, theta) PDF's mode equals `mode`.
@@ -113,7 +124,19 @@ def carbon_at_year(source_class: str, target_class: str, baseline_stock: float,
     assumption. Dispatches to the afforestation curve (real citation)
     for transitions TO forestry, and the generic placeholder curve
     otherwise.
+
+    NO-CHANGE CASE: if target_class == source_class, nothing is
+    actually transitioning, so the correct stock at any elapsed time
+    is simply baseline_stock -- NOT target_stock (a class's branch
+    mean, which may differ from this specific parcel's own measured
+    baseline). This is a genuine correction versus letting a "new
+    class" that happens to equal the original class fall through to
+    the trajectory math, which would incorrectly pull a stable parcel
+    toward its branch mean rather than leaving it at its own value.
     """
+    if target_class == source_class:
+        return baseline_stock
+
     years = np.array([years_elapsed])
     if target_class == "forestry" and source_class != "forestry":
         result = afforestation_trajectory(baseline_stock, target_stock, years)
