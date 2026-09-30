@@ -34,7 +34,10 @@ import numpy as np
 import torch
 
 from sample_reallocation import load_model_and_graph, sample_reallocation
-from carbon_transition_delta import compute_branch_means, compute_branch_stds, classify_land_cover
+from carbon_transition_delta import (
+    compute_branch_means, compute_branch_stds, classify_land_cover,
+    hybrid_transition_target_stock,
+)
 from carbon_time_dynamics import carbon_at_year, YEARS_TO_POLICY_TARGET
 
 COMBINED_PATH = "data/parcel_yield_carbon.gpkg"
@@ -93,18 +96,6 @@ def load_area_and_baseline():
     return combined
 
 
-# Heuristic proxy for likely shared/commonage land, NOT a confirmed
-# tenure-type field -- no explicit commonage attribute was found in
-# this pipeline's LPIS-derived columns (crop, tillage_class, Associat_S,
-# etc.). The signature is inferred from one CONFIRMED real example
-# (a 99.84ha Mayo 'Permanent Pasture' parcel, valid single polygon,
-# degree 3,059 -- bordering thousands of individual smallholdings,
-# consistent with large shared upland grazing). An individual farmer's
-# single large field doesn't border hundreds of separate neighbors;
-# only large shared land plausibly does. Thresholds below are a
-# conservative proxy, not a precise boundary -- IF THE RAW LPIS SOURCE
-# HAS AN ACTUAL TENURE-TYPE/COMMONAGE FIELD not yet surfaced through
-# this pipeline, prefer that over this heuristic.
 COMMONAGE_AREA_HA_THRESHOLD = 20.0   # typical LPIS field parcels are well under 10ha
 COMMONAGE_DEGREE_THRESHOLD = 150     # well above the 75th-percentile degree (~7) and
                                       # the >100-degree population (~2.4% of parcels
@@ -118,8 +109,10 @@ def flag_likely_commonage(parcel_ids: list[int], combined: gpd.GeoDataFrame,
     """
     Returns the subset of parcel_ids matching the commonage heuristic
     (area > COMMONAGE_AREA_HA_THRESHOLD AND graph degree >
-    COMMONAGE_DEGREE_THRESHOLD). See module-level comment above the
-    threshold constants for what this proxy is standing in for and why.
+    COMMONAGE_DEGREE_THRESHOLD). PROXY, not a confirmed tenure field --
+    see module-level note. Prefer a genuine land-tenure attribute
+    (e.g. Tailte Éireann cadastral parcels) over this heuristic if one
+    becomes available.
     """
     edges = pd.read_parquet(edges_path)
     region_set = set(parcel_ids)
@@ -152,10 +145,9 @@ def filter_reallocatable(parcel_ids: list[int], combined: gpd.GeoDataFrame,
     themselves a masking target.
 
     Also excludes likely shared/commonage land (see
-    flag_likely_commonage() -- a heuristic proxy, not a confirmed
-    tenure field) for the same reason immutable infrastructure is
-    excluded: no single reallocation decision can sensibly act on land
-    with no single decision-maker.
+    flag_likely_commonage()) for the same reason: no single
+    reallocation decision can sensibly act on land with no single
+    decision-maker.
     """
     region = combined[combined["parcel_id"].isin(parcel_ids)]
     is_immutable = region["crop"].str.upper().isin(IMMUTABLE_CLASSES)
@@ -172,10 +164,7 @@ def filter_reallocatable(parcel_ids: list[int], combined: gpd.GeoDataFrame,
             print(f"Excluded {len(commonage_ids)} likely shared/commonage "
                   f"parcel(s) (heuristic: area > {COMMONAGE_AREA_HA_THRESHOLD}ha "
                   f"AND graph degree > {COMMONAGE_DEGREE_THRESHOLD}) from the "
-                  f"reallocation target set: {sorted(commonage_ids)} -- no single "
-                  "reallocation decision can sensibly act on shared-tenure land. "
-                  "This is a PROXY, not a confirmed tenure field -- verify against "
-                  "the raw LPIS source if one exists.")
+                  f"reallocation target set: {sorted(commonage_ids)}")
             remaining_ids = [pid for pid in remaining_ids if pid not in commonage_ids]
 
     return remaining_ids
@@ -203,29 +192,31 @@ def score_scenario(parcel_ids: list[int], new_classes: dict, combined: gpd.GeoDa
     CARBON IS TIME-RESOLVED, NOT INSTANT-SWAP: total_carbon_t reflects
     each parcel's carbon stock at YEARS_TO_POLICY_TARGET years after
     reallocation (via carbon_time_dynamics.carbon_at_year()), not an
-    idealized immediate jump to the target class's steady-state value.
-    Only the afforestation transition has a literature-cited trajectory
-    shape; every other transition uses an unsourced placeholder
-    timescale -- see carbon_time_dynamics.py's module docstring. The
-    std above still reflects branch-level spread in the EVENTUAL
-    (steady-state) target value, applied at the policy-year point --
-    a stated simplification, not a rigorously time-resolved
-    uncertainty, since carbon_at_year() itself is deterministic given
-    its inputs.
+    idealized immediate jump to a target value.
+
+    THE TARGET VALUE ITSELF IS NOW THE SOLUM HYBRID, NOT A FLAT BRANCH
+    MEAN: for mineral-soil transitions (tillage/grassland/forestry),
+    carbon_at_year()'s target_stock is computed by
+    hybrid_transition_target_stock() -- this parcel's OWN baseline
+    scaled by SOLUM's soil-controlled relative land-use effect, not
+    the population branch mean of the target class (see
+    carbon_transition_delta.py's module docstring for why the flat
+    branch mean was a geographic confound, and why the hybrid corrects
+    it without needing this parcel's own soil cluster). Any transition
+    involving peatland (either direction) still uses the branch mean
+    (Option A) -- SOLUM's GLM excludes organic soils.
     """
     region = combined[combined["parcel_id"].isin(parcel_ids)].copy()
     region["new_class"] = region["parcel_id"].map(new_classes)
 
-    # --- Carbon: time-resolved (carbon_at_year), not instant-swap ---
-    # Each parcel's OWN measured baseline (carbon_t_c_per_ha_mean), not
-    # the source branch mean, anchors its trajectory -- carbon_at_year()
-    # itself handles the no-change case (new_class == original class)
-    # by returning baseline_stock directly rather than sliding toward
-    # a branch mean that may differ from this parcel's actual value.
+    # --- Carbon: time-resolved (carbon_at_year), hybrid target stock ---
     def _carbon_at_policy_year(row):
-        target_stock = branch_carbon_means.get(row["new_class"])
-        if target_stock is None or pd.isna(row["carbon_t_c_per_ha_mean"]):
+        if row["new_class"] not in branch_carbon_means or pd.isna(row["carbon_t_c_per_ha_mean"]):
             return np.nan
+        target_stock = hybrid_transition_target_stock(
+            row["land_cover_class"], row["new_class"],
+            row["carbon_t_c_per_ha_mean"], branch_carbon_means,
+        )
         return carbon_at_year(
             row["land_cover_class"], row["new_class"],
             row["carbon_t_c_per_ha_mean"], target_stock,

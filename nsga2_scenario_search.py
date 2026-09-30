@@ -47,6 +47,7 @@ from generate_scenarios import (
     load_area_and_baseline, filter_reallocatable, score_scenario,
 )
 from carbon_time_dynamics import carbon_at_year, YEARS_TO_POLICY_TARGET
+from carbon_transition_delta import hybrid_transition_target_stock
 
 
 def build_lookup_tables(parcel_ids, combined, branch_means, branch_stds, per_parcel_labels):
@@ -59,9 +60,19 @@ def build_lookup_tables(parcel_ids, combined, branch_means, branch_stds, per_par
     setup -- NOT per NSGA-II evaluation. This keeps evaluate_batch()'s
     vectorized fancy-indexing untouched; only the values feeding INTO
     the lookup table changed, not how the table is used downstream.
+
+    THE TARGET VALUE ITSELF IS THE SOLUM HYBRID, NOT A FLAT BRANCH
+    MEAN: for mineral-soil transitions (tillage/grassland/forestry),
+    hybrid_transition_target_stock() scales THIS PARCEL'S OWN baseline
+    by SOLUM's soil-controlled relative land-use effect, correcting the
+    geographic confound a flat branch_means[cls] lookup carries (see
+    carbon_transition_delta.py's module docstring). Any transition
+    involving peatland (either direction) falls back to the branch mean
+    (Option A) -- SOLUM's GLM excludes organic soils.
+
     carbon_at_year() itself handles the no-change case (a column whose
     class matches the parcel's own original class) by returning the
-    parcel's own baseline directly, not a branch mean.
+    parcel's own baseline directly, not a branch mean or hybrid value.
     """
     n_var = len(parcel_ids)
     max_domain = max(len(labels) for labels in per_parcel_labels)
@@ -82,8 +93,11 @@ def build_lookup_tables(parcel_ids, combined, branch_means, branch_stds, per_par
         source_class = baseline_class_by_pid[pid]
         baseline_stock = baseline_carbon_per_ha[p]
         for idx, cls in enumerate(labels):
+            target_stock = hybrid_transition_target_stock(
+                source_class, cls, baseline_stock, branch_means,
+            )
             padded_carbon_lookup[p, idx] = carbon_at_year(
-                source_class, cls, baseline_stock, branch_means[cls],
+                source_class, cls, baseline_stock, target_stock,
                 YEARS_TO_POLICY_TARGET,
             )
             padded_std_lookup[p, idx] = branch_stds.get(cls, 0.0)
@@ -262,6 +276,108 @@ class GNNSeededSampling(Sampling):
         return X
 
 
+def _best_other_class_idx(problem):
+    """
+    Per parcel, the column index of the single best-gain class OTHER
+    than the parcel's own current class -- computed from the SAME
+    precomputed, time-resolved, hybrid-corrected padded_carbon_lookup
+    the real objective (evaluate_batch) scores against, so this can't
+    silently disagree with what the search is actually optimizing.
+    Padding columns (beyond a parcel's actual domain size) and the
+    parcel's own current-class column are both excluded before taking
+    the argmax.
+    """
+    lookup = problem._tables["padded_carbon_lookup"].copy()
+    baseline_idx = problem._tables["baseline_idx_per_parcel"]
+    n_var, max_domain = lookup.shape
+
+    valid_rows = baseline_idx >= 0
+    lookup[valid_rows, baseline_idx[valid_rows]] = -np.inf  # exclude "no change"
+
+    col_idx = np.arange(max_domain)
+    pad_mask = col_idx[None, :] > problem.xu[:, None]  # exclude unused padding columns
+    lookup[pad_mask] = -np.inf
+
+    return lookup.argmax(axis=1)
+
+
+class HighDisruptionSampling(Sampling):
+    """
+    Forces a RANDOM subset of parcels -- sized to hit approximately
+    forced_disruption_level of the region's TOTAL AREA, not parcel
+    count, matching how the objective itself measures disruption -- to
+    their single best-gain OTHER class; leaves the rest at their
+    current class. A different random subset is drawn per individual,
+    giving genuine diversity within the high-disruption region rather
+    than one repeated individual.
+
+    RATIONALE: GNNSeededSampling alone is structurally biased toward
+    low disruption (see Section 5.5's interiority/fallback finding --
+    most GNN proposals fall back to "keep current class"). Population
+    scaling alone failed to extend the reachable disruption range under
+    the hybrid-corrected objective (tested up to population 300,
+    disruption range stuck at 0.1-0.2 despite substantial real headroom
+    existing per check_positive_gain_headroom.py). This gives NSGA-II's
+    crowding-distance selection real candidates to preserve and refine
+    in the high-disruption region from generation 1, instead of relying
+    on mutation to discover that region organically from a population
+    that starts nowhere near it.
+    """
+
+    def __init__(self, forced_disruption_level=0.7, seed=None):
+        super().__init__()
+        self.forced_disruption_level = forced_disruption_level
+        self.rng = np.random.default_rng(seed)
+
+    def _do(self, problem, n_samples, **kwargs):
+        n_var = problem.n_var
+        area_ha = problem._tables["area_ha"]
+        total_area = problem._tables["total_area_ha"]
+        baseline_idx = problem._tables["baseline_idx_per_parcel"]
+        best_other_idx = _best_other_class_idx(problem)
+
+        X = np.zeros((n_samples, n_var), dtype=int)
+        for i in range(n_samples):
+            order = self.rng.permutation(n_var)
+            cum_area = np.cumsum(area_ha[order])
+            n_forced = np.searchsorted(cum_area, self.forced_disruption_level * total_area) + 1
+            forced_positions = order[:n_forced]
+
+            row = baseline_idx.copy()
+            row[row < 0] = 0  # sentinel parcels (current class not in own domain) default to column 0
+            row[forced_positions] = best_other_idx[forced_positions]
+            X[i] = row
+        return X
+
+
+class MixedSampling(Sampling):
+    """
+    Combines GNNSeededSampling (spatially-informed, low-disruption-
+    biased) with HighDisruptionSampling (forced high-disruption,
+    genuinely diverse but spatially naive) in a fixed proportion, so
+    the initial population has real material for crowding-distance
+    selection to work with across the WHOLE disruption range, not just
+    the low end the GNN alone would produce.
+    """
+
+    def __init__(self, gnn_sampling, high_disruption_sampling, high_disruption_fraction=0.3):
+        super().__init__()
+        self.gnn_sampling = gnn_sampling
+        self.high_disruption_sampling = high_disruption_sampling
+        self.high_disruption_fraction = high_disruption_fraction
+
+    def _do(self, problem, n_samples, **kwargs):
+        n_high = int(round(n_samples * self.high_disruption_fraction))
+        n_gnn = n_samples - n_high
+        parts = []
+        if n_gnn > 0:
+            parts.append(self.gnn_sampling._do(problem, n_gnn, **kwargs))
+        if n_high > 0:
+            parts.append(self.high_disruption_sampling._do(problem, n_high, **kwargs))
+        return np.vstack(parts)
+        return X
+
+
 class UniformParcelCrossover(Crossover):
     """Per-parcel uniform crossover: each parcel independently inherits
     its class from parent A or B with 50% probability. Simple, and a
@@ -366,9 +482,20 @@ def run_nsga2_search(parcel_ids, n_generations=200, pop_size=200, seed=1):
 
     problem = ScenarioProblem(parcel_ids, region_combined, branch_means, branch_stds)
 
+    # MixedSampling, not plain GNNSeededSampling: population scaling alone
+    # (tested up to pop=300) failed to extend the reachable disruption
+    # range under the hybrid-corrected objective, despite real headroom
+    # existing (check_positive_gain_headroom.py). 30% of the initial
+    # population is explicitly forced toward ~70% disruption, giving
+    # crowding-distance selection real high-disruption material to work
+    # with from generation 1.
     algorithm = NSGA2(
         pop_size=pop_size,
-        sampling=GNNSeededSampling(parcel_ids, model, data, meta, idx_to_class),
+        sampling=MixedSampling(
+            GNNSeededSampling(parcel_ids, model, data, meta, idx_to_class),
+            HighDisruptionSampling(forced_disruption_level=0.7, seed=seed),
+            high_disruption_fraction=0.3,
+        ),
         crossover=UniformParcelCrossover(),
         mutation=RandomResetMutation(),
         eliminate_duplicates=True,
@@ -412,7 +539,7 @@ if __name__ == "__main__":
     all_fronts = {}
     for seed in [1, 2, 3, 4]:
         print(f"\n{'='*20} SEED {seed} {'='*20}")
-        result, pareto_front = run_nsga2_search(parcel_ids, n_generations=400, pop_size=600, seed=seed)
+        result, pareto_front = run_nsga2_search(parcel_ids, n_generations=300, pop_size=300, seed=seed)
         all_fronts[seed] = pareto_front
 
     print(f"\n{'='*20} SUMMARY ACROSS {len(all_fronts)} SEEDS {'='*20}")
