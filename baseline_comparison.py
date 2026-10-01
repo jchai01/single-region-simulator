@@ -49,6 +49,10 @@ TARGET_DISRUPTION_LEVELS = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
 
 def random_baseline(parcel_ids, combined, branch_means, branch_stds,
                     disruption_fraction, seed=None):
+    """Returns (score_result, new_classes). new_classes (parcel_id ->
+    assigned class, for EVERY parcel in the region, changed or not) is
+    the full per-parcel record of what this scenario actually did --
+    exported by export_scenario_details() below for spatial display."""
     rng = np.random.default_rng(seed)
     region = combined[combined["parcel_id"].isin(parcel_ids)].copy()
 
@@ -66,11 +70,14 @@ def random_baseline(parcel_ids, combined, branch_means, branch_stds,
         else:
             new_classes[pid] = row["land_cover_class"]
 
-    return score_scenario(parcel_ids, new_classes, combined, branch_means, branch_stds,
-                          tillage_yield_mean=0.0, tillage_yield_std=0.0, grassland_index_std=0.0)
+    result = score_scenario(parcel_ids, new_classes, combined, branch_means, branch_stds,
+                            tillage_yield_mean=0.0, tillage_yield_std=0.0, grassland_index_std=0.0)
+    return result, new_classes
 
 
 def greedy_baseline(parcel_ids, combined, branch_means, branch_stds, disruption_fraction):
+    """Returns (score_result, new_classes) -- see random_baseline()'s
+    docstring for what new_classes is and why it's returned."""
     region = combined[combined["parcel_id"].isin(parcel_ids)].copy()
 
     # For each parcel, find its single BEST realistic target class and
@@ -109,8 +116,9 @@ def greedy_baseline(parcel_ids, combined, branch_means, branch_stds, disruption_
         else:
             new_classes[pid] = row["land_cover_class"]
 
-    return score_scenario(parcel_ids, new_classes, combined, branch_means, branch_stds,
-                          tillage_yield_mean=0.0, tillage_yield_std=0.0, grassland_index_std=0.0)
+    result = score_scenario(parcel_ids, new_classes, combined, branch_means, branch_stds,
+                            tillage_yield_mean=0.0, tillage_yield_std=0.0, grassland_index_std=0.0)
+    return result, new_classes
 
 
 def branch_means_from_loaded(combined: pd.DataFrame) -> dict:
@@ -125,15 +133,31 @@ def branch_stds_from_loaded(combined: pd.DataFrame) -> dict:
     return combined.groupby("land_cover_class")["carbon_t_c_per_ha_mean"].std().to_dict()
 
 
-def run_comparison(parcel_ids, n_random_seeds=5):
-    combined = load_area_and_baseline()
-    branch_means = branch_means_from_loaded(combined)
-    branch_stds = branch_stds_from_loaded(combined)
-    parcel_ids = filter_reallocatable(parcel_ids, combined)
+def run_comparison(parcel_ids, n_random_seeds=5, combined=None, branch_means=None,
+                   branch_stds=None, skip_filter=False):
+    """
+    combined/branch_means/branch_stds: pass these in (already loaded) to
+    avoid re-reading the geopackage and recomputing branch stats when
+    calling this alongside export_scenario_details() on the same data --
+    see __main__ below. Defaults to loading them internally (unchanged
+    behavior) if not provided, so standalone calls elsewhere still work.
+
+    skip_filter: set True if parcel_ids has already been through
+    filter_reallocatable() by the caller, to avoid the exclusion message
+    printing a second time.
+    """
+    if combined is None:
+        combined = load_area_and_baseline()
+    if branch_means is None:
+        branch_means = branch_means_from_loaded(combined)
+    if branch_stds is None:
+        branch_stds = branch_stds_from_loaded(combined)
+    if not skip_filter:
+        parcel_ids = filter_reallocatable(parcel_ids, combined)
 
     rows = []
     for target_disruption in TARGET_DISRUPTION_LEVELS:
-        greedy_result = greedy_baseline(parcel_ids, combined, branch_means, branch_stds, target_disruption)
+        greedy_result, _ = greedy_baseline(parcel_ids, combined, branch_means, branch_stds, target_disruption)
         rows.append({
             "method": "greedy_heuristic", "target_disruption": target_disruption,
             "actual_disruption": greedy_result["disruption_fraction"],
@@ -142,7 +166,7 @@ def run_comparison(parcel_ids, n_random_seeds=5):
 
         random_gains = [
             random_baseline(parcel_ids, combined, branch_means, branch_stds,
-                            target_disruption, seed=s)["carbon_delta_vs_baseline_t"]
+                            target_disruption, seed=s)[0]["carbon_delta_vs_baseline_t"]
             for s in range(n_random_seeds)
         ]
         rows.append({
@@ -157,8 +181,91 @@ def run_comparison(parcel_ids, n_random_seeds=5):
     return result
 
 
+def export_scenario_details(parcel_ids, combined, branch_means, branch_stds,
+                            n_random_seeds=5, skip_filter=False,
+                            out_path="data/scenario_details_baselines.parquet"):
+    """
+    Long-format export matching nsga2_scenario_search.py's
+    export_scenario_details() schema exactly: one row per (method,
+    scenario_id, parcel_id), columns method, scenario_id,
+    disruption_fraction, carbon_delta_vs_baseline_t, parcel_id,
+    original_class, assigned_class, changed.
+
+    method="greedy": one scenario_id per disruption level (the
+    disruption level itself, as a string, e.g. "0.4").
+    method="random": one scenario_id per (disruption level, seed) pair
+    (e.g. "0.4_seed2") -- unlike run_comparison()'s aggregate table,
+    which averages random's carbon gain across seeds, this export keeps
+    each seed's own scenario separately displayable, since "the random
+    baseline" isn't really one scenario but a distribution of them.
+
+    Applies filter_reallocatable() internally by default, so callers can
+    pass the raw region parcel_ids without pre-filtering. Set
+    skip_filter=True if the caller already filtered (e.g. __main__ below,
+    sharing one filtered parcel_ids list with run_comparison()) to avoid
+    the exclusion message printing a second time.
+    """
+    if not skip_filter:
+        parcel_ids = filter_reallocatable(parcel_ids, combined)
+    region = combined[combined["parcel_id"].isin(parcel_ids)]
+    original_class_by_pid = dict(zip(region["parcel_id"], region["land_cover_class"]))
+
+    rows = []
+
+    for target_disruption in TARGET_DISRUPTION_LEVELS:
+        greedy_result, greedy_new_classes = greedy_baseline(
+            parcel_ids, combined, branch_means, branch_stds, target_disruption,
+        )
+        scenario_id = f"{target_disruption:.1f}"
+        for pid in parcel_ids:
+            original = original_class_by_pid[pid]
+            assigned = greedy_new_classes[pid]
+            rows.append({
+                "method": "greedy", "scenario_id": scenario_id,
+                "disruption_fraction": greedy_result["disruption_fraction"],
+                "carbon_delta_vs_baseline_t": greedy_result["carbon_delta_vs_baseline_t"],
+                "parcel_id": pid, "original_class": original, "assigned_class": assigned,
+                "changed": assigned != original,
+            })
+
+        for s in range(n_random_seeds):
+            random_result, random_new_classes = random_baseline(
+                parcel_ids, combined, branch_means, branch_stds, target_disruption, seed=s,
+            )
+            scenario_id = f"{target_disruption:.1f}_seed{s}"
+            for pid in parcel_ids:
+                original = original_class_by_pid[pid]
+                assigned = random_new_classes[pid]
+                rows.append({
+                    "method": "random", "scenario_id": scenario_id,
+                    "disruption_fraction": random_result["disruption_fraction"],
+                    "carbon_delta_vs_baseline_t": random_result["carbon_delta_vs_baseline_t"],
+                    "parcel_id": pid, "original_class": original, "assigned_class": assigned,
+                    "changed": assigned != original,
+                })
+
+    details = pd.DataFrame(rows)
+    details.to_parquet(out_path, index=False)
+    print(f"Exported per-parcel scenario detail for greedy ({len(TARGET_DISRUPTION_LEVELS)} scenarios) "
+          f"and random ({len(TARGET_DISRUPTION_LEVELS) * n_random_seeds} scenarios) "
+          f"({len(details)} rows) to {out_path}")
+    return details
+
+
 if __name__ == "__main__":
     with open("data/offaly_subregion_parcel_ids.txt") as f:
         example_parcel_ids = [int(line.strip()) for line in f if line.strip()]
     print(f"Loaded {len(example_parcel_ids)} parcel_ids from the saved case-study region")
-    run_comparison(example_parcel_ids)
+
+    # Load once, share across both calls below -- avoids reading the
+    # geopackage and filtering parcel_ids twice (and printing the
+    # exclusion message twice).
+    _combined = load_area_and_baseline()
+    _branch_means = branch_means_from_loaded(_combined)
+    _branch_stds = branch_stds_from_loaded(_combined)
+    _filtered_parcel_ids = filter_reallocatable(example_parcel_ids, _combined)
+
+    run_comparison(_filtered_parcel_ids, combined=_combined, branch_means=_branch_means,
+                   branch_stds=_branch_stds, skip_filter=True)
+    export_scenario_details(_filtered_parcel_ids, _combined, _branch_means, _branch_stds,
+                            skip_filter=True)

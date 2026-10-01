@@ -516,7 +516,78 @@ def run_nsga2_search(parcel_ids, n_generations=200, pop_size=200, seed=1):
     print(f"\nFinal Pareto front: {len(pareto_front)} non-dominated scenarios "
           f"(vs. sample-and-rank's typical ~2/10 non-dominated)")
     print(pareto_front.round(1).to_string(index=False))
-    return result, pareto_front
+
+    # result.X (shape n_nondominated x n_var) is the full per-parcel decision
+    # for every scenario on the front -- WHICH parcel was reassigned to WHAT,
+    # not just the aggregate carbon/disruption pair. pymoo computes this for
+    # every point already; it was simply never looked at before. Exporting it
+    # here is what makes a scenario spatially displayable (a map), not just a
+    # single number on a chart.
+    scenario_details = export_scenario_details(result, problem, parcel_ids, seed)
+    return result, pareto_front, scenario_details
+
+
+def export_scenario_details(result, problem, parcel_ids, seed,
+                            out_path_template="data/scenario_details_seed{seed}.parquet"):
+    """
+    Long-format export: one row per (scenario, parcel), for every
+    non-dominated scenario in result.X. Matches baseline_comparison.py's
+    export_scenario_details() schema exactly, so files from both can be
+    concatenated directly: method (always "nsga2" here), scenario_id
+    (f"seed{seed}_{rank}" -- rank by carbon_delta_vs_baseline_t, matching
+    the printed Pareto front table; the seed prefix is required, not
+    decorative -- without it, rank 0 from every seed's run would collide
+    into one indistinguishable scenario_id once multiple seeds' files are
+    concatenated), disruption_fraction, carbon_delta_vs_baseline_t (both
+    repeated per parcel row, from result.F, so a viewer can filter/join
+    without a separate lookup), parcel_id, original_class, assigned_class,
+    changed.
+
+    This is what a map view needs: for a chosen (method, scenario_id),
+    filter to its rows and join parcel_id back to geometry (e.g.
+    parcel_yield_carbon.gpkg) to color each parcel by assigned_class or
+    by changed/unchanged.
+    """
+    X = result.X  # (n_nondominated, n_var)
+    F = result.F  # (n_nondominated, 2): [neg_carbon_delta_t, disruption_fraction]
+    n_scenarios, n_var = X.shape
+
+    baseline_class_by_pid = {
+        pid: problem.per_parcel_labels[p][problem._tables["baseline_idx_per_parcel"][p]]
+        if problem._tables["baseline_idx_per_parcel"][p] >= 0 else None
+        for p, pid in enumerate(parcel_ids)
+    }
+
+    # Rank scenarios by carbon_delta_vs_baseline_t descending, matching the
+    # printed pareto_front table's order, so scenario_id lines up with what
+    # a person reading the console output would call "the Nth-best scenario".
+    carbon_delta = -F[:, 0]
+    order = carbon_delta.argsort()[::-1]
+
+    rows = []
+    for rank, s in enumerate(order):
+        disruption = F[s, 1]
+        c_delta = carbon_delta[s]
+        for p, pid in enumerate(parcel_ids):
+            assigned_class = problem.per_parcel_labels[p][X[s, p]]
+            original_class = baseline_class_by_pid[pid]
+            rows.append({
+                "method": "nsga2",
+                "scenario_id": f"seed{seed}_{rank}",
+                "disruption_fraction": disruption,
+                "carbon_delta_vs_baseline_t": c_delta,
+                "parcel_id": pid,
+                "original_class": original_class,
+                "assigned_class": assigned_class,
+                "changed": assigned_class != original_class,
+            })
+
+    details = pd.DataFrame(rows)
+    out_path = out_path_template.format(seed=seed)
+    details.to_parquet(out_path, index=False)
+    print(f"Exported per-parcel scenario detail for {n_scenarios} scenarios "
+          f"({len(details)} rows) to {out_path}")
+    return details
 
 
 def load_saved_subregion_parcel_ids(path="data/offaly_subregion_parcel_ids.txt"):
@@ -539,7 +610,7 @@ if __name__ == "__main__":
     all_fronts = {}
     for seed in [1, 2, 3, 4]:
         print(f"\n{'='*20} SEED {seed} {'='*20}")
-        result, pareto_front = run_nsga2_search(parcel_ids, n_generations=300, pop_size=300, seed=seed)
+        result, pareto_front, scenario_details = run_nsga2_search(parcel_ids, n_generations=200, pop_size=200, seed=seed)
         all_fronts[seed] = pareto_front
 
     print(f"\n{'='*20} SUMMARY ACROSS {len(all_fronts)} SEEDS {'='*20}")
