@@ -25,10 +25,10 @@ DELIBERATE EXCLUSIONS (leakage prevention):
 DEPENDENCIES: torch, torch_geometric. Install per your CUDA version:
   pip install torch torch_geometric
 This is a genuinely heavy step -- realistically needs your HPC/GPU
-setup at 1.5M nodes / 5.3M edges, not a laptop CPU run.
+setup at 1.5M nodes / ~16M edges (corrected graph), not a laptop CPU run.
 """
 
-import os
+import hashlib
 import time
 
 import numpy as np
@@ -50,6 +50,32 @@ EMBED_DIM = 16
 N_EPOCHS = 30
 BATCH_SIZE = 2048
 NUM_NEIGHBORS = [10, 10]   # 2-hop neighbor sampling fanout, per NeighborLoader batch
+
+
+def _sha256_file(path, chunk_bytes=1 << 20):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(chunk_bytes), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def graph_fingerprint(n_nodes, n_edges):
+    """
+    Identifies the exact graph files a model is trained on / run against.
+    Saved into the checkpoint at training time and recomputed at inference
+    (sample_reallocation.load_model_and_graph), so a model trained on a
+    stale graph can no longer be run silently against a newer one. The
+    vocabulary-size checks alone cannot catch this: they depend on the node
+    table, not on edges.
+    """
+    return {
+        "n_nodes": int(n_nodes),
+        "n_edges": int(n_edges),
+        "avg_degree": round(2 * n_edges / n_nodes, 4),
+        "nodes_sha256": _sha256_file(NODES_PATH),
+        "edges_sha256": _sha256_file(EDGES_PATH),
+    }
 
 
 # ---------------------------------------------------------------
@@ -77,20 +103,11 @@ def classify_land_cover(row) -> str:
 def build_pyg_data():
     nodes = pd.read_parquet(NODES_PATH)
     edges = pd.read_parquet(EDGES_PATH)
-
-    # Visibility check: which graph version is actually loaded, printed
-    # directly from the training log rather than requiring a separate
-    # check -- this ran into ambiguity more than once before (unclear
-    # whether a stale pre-fix graph_edges.parquet was in use, since
-    # training wall-clock time alone doesn't distinguish the two: fixed
-    # neighbor-sampling fanout in NeighborLoader makes per-epoch cost
-    # largely independent of actual graph density).
-    avg_degree = 2 * len(edges) / len(nodes)
-    print(f"Loaded graph: {len(nodes):,} nodes, {len(edges):,} edges, "
-          f"avg degree {avg_degree:.2f}")
-    print(f"  data/graph_edges.parquet modified: "
-          f"{os.path.getmtime(EDGES_PATH)} (Unix timestamp -- compare "
-          "against your last confirmed build_parcel_graph.py run)")
+    fingerprint = graph_fingerprint(len(nodes), len(edges))
+    print(f"Graph: {fingerprint['n_nodes']:,} nodes, {fingerprint['n_edges']:,} edges, "
+          f"avg degree {fingerprint['avg_degree']:.2f}  "
+          f"(corrected intersects()+buffer graph: ~16.08M edges / ~20.9; "
+          f"the old touches() graph had mean degree ~3)")
 
     nodes["land_cover_class"] = nodes.apply(classify_land_cover, axis=1)
     classes = sorted(nodes["land_cover_class"].unique())
@@ -137,6 +154,7 @@ def build_pyg_data():
         "n_classes": n_classes, "MASK_IDX": MASK_IDX,
         "n_assoc": len(assoc_categories), "n_county": len(county_categories),
         "class_to_idx": class_to_idx,
+        "graph_fingerprint": fingerprint,
     }
     return data, meta
 

@@ -1,0 +1,89 @@
+{
+  "delivery": "2026-10-07 (c): final-results edition + manuscript figures",
+  "files": {
+    "carbon_time_dynamics.py": {
+      "sha256": "b90e2e9e7acdcb275853678f2a2215a7bb6638c3612e469a18677e479fb5d67e",
+      "role": "the single definition of what a move earns (policy_year_stock)"
+    },
+    "carbon_transition_delta.py": {
+      "sha256": "17c7ffc702fe75aead9648790db366668d4de614e39b17a2d91593f96b94e711",
+      "role": "SOLUM-hybrid target stock"
+    },
+    "generate_scenarios.py": {
+      "sha256": "3e0ff813ca10bb2998228129ad7772d205e81e4dfcebe7264eabb8a5fd16771b",
+      "role": "scoring, candidate filter, reclassification switch (adopted)"
+    },
+    "baseline_comparison.py": {
+      "sha256": "546d0f0e1b1ca75a8f6890b558ef4b60a54e4da80227bfcf99fedd2938e4b73b",
+      "role": "greedy (stop), greedy_fill and random baselines + export"
+    },
+    "nsga2_scenario_search.py": {
+      "sha256": "cc4acf6e7bc1974ef70cd2b063347111eb09950f8efbb61795db589179e6aec7",
+      "role": "NSGA-II search (pop 300 / gen 300) + exports"
+    },
+    "solve_exact_front.py": {
+      "sha256": "c551b74710b697c1988bb7355521734675c31ca94363a65ccf0b023cead4fe0c",
+      "role": "exact optimum (MILP) + summary table"
+    },
+    "compare_methods_at_budget.py": {
+      "sha256": "7c2f0590017392919dc5c01a2930001c3f5a5fe2e083ae7c0b25fc7135f7be58",
+      "role": "budget-matched comparison + candidate-set consistency check"
+    },
+    "mckp_tools.py": {
+      "sha256": "9d6eeda093103e435266930e34986abe7d0c7407778758bb10e5840508741abc",
+      "role": "knapsack toolkit (exact, greedy, blocks)"
+    },
+    "check_greedy_agreement.py": {
+      "sha256": "8350fb7959e94710fa4093ce087e0551bd4ce359faf116343e6df186dcc04499",
+      "role": "greedy agreement and tie-order diagnostic"
+    },
+    "compare_candidate_sets.py": {
+      "sha256": "e8a1a473f8a92e4d21dcc9a28202c18b387142aca9c196d312d45d3d9a360b24",
+      "role": "candidate-set experiment"
+    },
+    "experiment_gain_uncertainty.py": {
+      "sha256": "4366c6a91e2de2bbe0a168c34e8fce8361d9e463c6c85a565dd9f5237e82d0df",
+      "role": "gain-uncertainty experiment"
+    },
+    "experiment_granularity.py": {
+      "sha256": "52f5c36046734c4721bd031a5c053ce82977a0c37883d2145eafd2c12e225ebe",
+      "role": "decision-unit-size experiment"
+    },
+    "test_experiments.py": {
+      "sha256": "855beb48b147de72bfc7d293e31cece60d44bec76a7096de4268fe0937d4f423",
+      "role": "tests for the toolkit and experiments"
+    },
+    "test_scoring_consistency.py": {
+      "sha256": "7ec05e383e056cc1b3190da7f08c1dc4b3156826c36fc5b251ed6a458a37a704",
+      "role": "scorer / lookup table / greedy ranking agreement test"
+    },
+    "train_masked_gnn.py": {
+      "sha256": "785182376892a129e55b8679eb39733686f35aeb7d54fa97e33a075e650a2d47",
+      "role": "GNN training (stores a graph fingerprint)"
+    },
+    "sample_reallocation.py": {
+      "sha256": "f7700eb3d46cf1b24c90a4aaa9e2a36501da295149b231889df9cc1c82559506",
+      "role": "GNN inference (refuses a mismatched graph)"
+    },
+    "check_gnn_provenance.py": {
+      "sha256": "be862898d857c21960f033baad49bd72718b672282659efe05c99a1b3c2d142b",
+      "role": "does the checkpoint match the graph on disk"
+    },
+    "extract_region_geometry.py": {
+      "sha256": "72349b62c84c96ab0edfd1b0912b69f7f9f18dcc3bd4505e8c644c0037528d40",
+      "role": "region-only geometry for the viewer"
+    },
+    "patch_existing_seed_files.py": {
+      "sha256": "31aa2e96ad78728a0b4e11c16c64259de012c7e7c428880d83dcf853e9359d18",
+      "role": "one-time fix for old seed exports"
+    },
+    "app.py": {
+      "sha256": "b6c29ea2f7ef8b85d7f96f7bf4fb5ccc5c74038a121bdc2cd3a621a79a242b8a",
+      "role": "Streamlit scenario viewer"
+    },
+    "make_paper_figures.py": {
+      "sha256": "41846639066daec3fe139c3c82b70fe01b9aa9c00e2f6bc6f3dd255a179fde9e",
+      "role": "regenerates the manuscript figures from data/*.csv"
+    }
+  }
+}

@@ -12,8 +12,9 @@ CAVEAT (see train_masked_gnn.py's docstring): the Associat_S/COUNTY
 index mappings are NOT saved in the checkpoint -- they are
 deterministically reconstructed by re-running build_pyg_data() on the
 same underlying parquet files. This is safe only as long as those
-files are unchanged since training. If you retrain after any upstream
-data change, re-verify this assumption.
+files are unchanged since training -- load_model_and_graph() now enforces
+this via the graph fingerprint stored in the checkpoint (warns if the
+checkpoint predates fingerprinting).
 """
 
 import numpy as np
@@ -45,6 +46,28 @@ def load_model_and_graph():
             "sampling results until this is resolved (retrain, or "
             "confirm the data files are truly identical)."
         )
+
+    # Graph provenance: the vocabulary checks above cannot detect a model
+    # trained on a different graph (they depend on nodes, not edges). The
+    # checkpoint records a fingerprint of the exact graph files it was trained
+    # on (train_masked_gnn.graph_fingerprint); require it to match the files
+    # currently on disk.
+    trained_fp = meta.get("graph_fingerprint")
+    current_fp = rebuilt_meta["graph_fingerprint"]
+    if trained_fp is None:
+        print("WARNING: this checkpoint has no graph fingerprint (trained before "
+              "provenance tracking), so it cannot be verified as trained on the "
+              f"current graph ({current_fp['n_edges']:,} edges). Retrain with the "
+              "current train_masked_gnn.py to make this verifiable; "
+              "check_gnn_provenance.py reports what the file timestamps can show.")
+    else:
+        for key in ["n_edges", "nodes_sha256", "edges_sha256"]:
+            assert trained_fp[key] == current_fp[key], (
+                f"Graph mismatch on '{key}': the checkpoint was trained on a graph "
+                f"with {trained_fp['n_edges']:,} edges, but data/ now holds one with "
+                f"{current_fp['n_edges']:,}. Retrain (python train_masked_gnn.py) "
+                "before trusting any sampling result."
+            )
 
     model = MaskedLandUseGNN(
         meta["n_classes"], meta["MASK_IDX"], meta["n_assoc"], meta["n_county"],

@@ -31,6 +31,8 @@ upstream instead of re-joining it here, next time the graph is rebuilt.
 import geopandas as gpd
 import pandas as pd
 import numpy as np
+import os
+
 import torch
 
 from sample_reallocation import load_model_and_graph, sample_reallocation
@@ -38,7 +40,7 @@ from carbon_transition_delta import (
     compute_branch_means, compute_branch_stds, classify_land_cover,
     hybrid_transition_target_stock,
 )
-from carbon_time_dynamics import carbon_at_year, YEARS_TO_POLICY_TARGET
+from carbon_time_dynamics import carbon_at_year, policy_year_stock, YEARS_TO_POLICY_TARGET
 
 COMBINED_PATH = "data/parcel_yield_carbon.gpkg"
 
@@ -56,6 +58,17 @@ IMMUTABLE_CLASSES = {
     "QUARRY", "LAKE / WATERWAY / POND", "GARDENS", "RECREATIONAL AREA",
     "NURSERY",
 }
+
+# Parcels whose OWN land-cover class is one of these are never reallocation
+# candidates. 'excluded' is non-agricultural land that carbon_model_v1 gave a
+# PLACEHOLDER baseline of 0.0 t C/ha; "converting" it to forestry creates ~290
+# t C/ha that does not exist (in the Offaly case study these 46 parcels alone
+# were worth 23,180 t C -- over half of all carbon at the 0.1 budget).
+# 'unresolved_crop' is real cropland with no defined source class: its
+# transitions fall outside SOLUM's scope and use the geographically-confounded
+# branch-mean fallback, and NSGA-II's encoding cannot represent "leave it
+# unchanged" for it. Both stay in the graph as fixed context.
+NON_CANDIDATE_LAND_COVER = {"excluded", "unresolved_crop"}
 
 # Area-weighted branch-mean yield for tillage only (t/ha) -- computed
 # live from the combined data, same "no hardcoded numbers" principle
@@ -83,16 +96,74 @@ def compute_grassland_index_std(combined: gpd.GeoDataFrame) -> float:
     return float(grass["grassland_index_mean"].std())
 
 
-def load_area_and_baseline():
+# 'unresolved_crop' parcels are real cropland that the yield model had no source
+# for. Those whose crop is a plain arable/forage crop are tillage in every sense
+# that matters for the carbon transition (SOLUM's tillage reference class, a
+# measured soil baseline), so they can be treated as tillage candidates. This is
+# applied ONLY here, at the scenario layer, never inside classify_land_cover():
+# train_masked_gnn.py uses that function for the GNN's class vocabulary, so
+# changing it there would force a GNN retrain. ADOPTED for the case study because
+# compare_candidate_sets.py showed the 14 maize / fodder beet / kale parcels (69.5 ha) are worth
+# +5.5-6.1% of the optimum at budgets >= 0.3 (same hectares); set the switch below to False to
+# reproduce the earlier 597-parcel results.
+TILLAGE_LIKE_CROPS = {"MAIZE", "FODDER BEET", "KALE"}
+
+# THE switch. Set it to True HERE to adopt the reclassification for every script (baselines, NSGA-II,
+# the exact solver, the experiments) at once -- they all call load_area_and_baseline() with no argument.
+# For a one-off A/B run, the environment variable RECLASSIFY_TILLAGE_LIKE_UNRESOLVED=1 (or 0) overrides
+# this line without editing code, e.g.   RECLASSIFY_TILLAGE_LIKE_UNRESOLVED=1 python baseline_comparison.py
+# but then EVERY stage of that comparison must use it: compare_methods_at_budget.py refuses to compare
+# exports built on different candidate sets, and every load prints which setting it used.
+RECLASSIFY_TILLAGE_LIKE_UNRESOLVED = True    # ADOPTED: set False (or env var =0) to reproduce the earlier 597-parcel runs
+
+
+def resolve_reclassify_setting(flag=None):
+    """-> (on: bool, where it came from). Precedence: explicit argument > environment variable
+    RECLASSIFY_TILLAGE_LIKE_UNRESOLVED (read at call time) > the constant above."""
+    if flag is not None:
+        return bool(flag), "explicit argument"
+    env = os.environ.get("RECLASSIFY_TILLAGE_LIKE_UNRESOLVED")
+    if env is not None and env.strip() != "":
+        return env.strip().lower() in ("1", "true", "yes", "on"), "environment variable RECLASSIFY_TILLAGE_LIKE_UNRESOLVED"
+    return bool(RECLASSIFY_TILLAGE_LIKE_UNRESOLVED), "default in generate_scenarios.py"
+
+
+def reclassify_unresolved_tillage_like(combined, crops=None, verbose=True):
+    """Relabels 'unresolved_crop' parcels whose crop name is in `crops`
+    (default TILLAGE_LIKE_CROPS) as 'tillage'. Returns the SAME frame, modified."""
+    crops = TILLAGE_LIKE_CROPS if crops is None else {c.upper() for c in crops}
+    is_unresolved = combined["land_cover_class"] == "unresolved_crop"
+    name = combined["crop"].astype(str).str.upper().str.strip()
+    move = is_unresolved & name.isin(crops)
+    combined.loc[move, "land_cover_class"] = "tillage"
+    if verbose:
+        left = combined.loc[is_unresolved & ~move, "crop"].astype(str).str.upper().value_counts()
+        area = f" ({combined.loc[move, 'area_ha'].sum():,.1f} ha)" if "area_ha" in combined.columns else ""
+        print(f"Reclassified {int(move.sum())} 'unresolved_crop' parcel(s){area} in the loaded dataset (not just the case-study region) "
+              f"with crop in {sorted(crops)} as tillage candidates; "
+              f"{int((is_unresolved & ~move).sum())} unresolved parcel(s) remain excluded"
+              + (f" (most common crops left: {left.head(5).to_dict()})" if len(left) else "") + ".")
+    return combined
+
+
+def load_area_and_baseline(reclassify_tillage_like=None):
     """
     Loads real parcel area (recovering the gap noted above) and each
     parcel's ORIGINAL land_cover_class, keyed by parcel_id (row
     position, matching build_parcel_graph.py's assignment).
+
+    reclassify_tillage_like: None -> module switch RECLASSIFY_TILLAGE_LIKE_UNRESOLVED
+    (default False); True/False overrides it.
     """
     combined = gpd.read_file(COMBINED_PATH).reset_index(drop=True)
     combined["parcel_id"] = combined.index
     combined["area_ha"] = combined.geometry.area / 10_000
     combined["land_cover_class"] = combined.apply(classify_land_cover, axis=1)
+    on, where = resolve_reclassify_setting(reclassify_tillage_like)
+    print(f"Candidate-set setting: maize/fodder beet/kale 'unresolved_crop' parcels are "
+          f"{'RECLASSIFIED as tillage candidates' if on else 'NOT reclassified (they stay excluded)'} [{where}].")
+    if on:
+        reclassify_unresolved_tillage_like(combined)
     return combined
 
 
@@ -135,7 +206,9 @@ def flag_likely_commonage(parcel_ids: list[int], combined: gpd.GeoDataFrame,
 
 
 def filter_reallocatable(parcel_ids: list[int], combined: gpd.GeoDataFrame,
-                         exclude_likely_commonage: bool = True) -> list[int]:
+                         exclude_likely_commonage: bool = True,
+                         exclude_non_candidate_classes: bool = True,
+                         exclude_missing_carbon: bool = True) -> list[int]:
     """
     Drops any parcel whose ORIGINAL crop is genuinely immutable
     infrastructure (see IMMUTABLE_CLASSES) from the maskable set --
@@ -148,6 +221,13 @@ def filter_reallocatable(parcel_ids: list[int], combined: gpd.GeoDataFrame,
     flag_likely_commonage()) for the same reason: no single
     reallocation decision can sensibly act on land with no single
     decision-maker.
+
+    And, unless exclude_non_candidate_classes=False, parcels whose own
+    land-cover class is in NON_CANDIDATE_LAND_COVER (see its comment),
+    and, unless exclude_missing_carbon=False, parcels with no carbon
+    baseline.
+    Every method (greedy, random, NSGA-II, the exact solver) calls this
+    function, so they all see the SAME candidate set -- keep it that way.
     """
     region = combined[combined["parcel_id"].isin(parcel_ids)]
     is_immutable = region["crop"].str.upper().isin(IMMUTABLE_CLASSES)
@@ -156,7 +236,34 @@ def filter_reallocatable(parcel_ids: list[int], combined: gpd.GeoDataFrame,
         print(f"Excluded {n_dropped} immutable-infrastructure parcels "
               f"(buildings/roads/quarries/water) from the reallocation "
               "target set -- these remain as fixed context, not candidates.")
-    remaining_ids = region.loc[~is_immutable, "parcel_id"].tolist()
+    remaining = region.loc[~is_immutable]
+
+    if exclude_non_candidate_classes:
+        non_cand = remaining["land_cover_class"].isin(NON_CANDIDATE_LAND_COVER)
+        if non_cand.any():
+            dropped = remaining.loc[non_cand]
+            area = f" ({dropped['area_ha'].sum():,.1f} ha)" if "area_ha" in dropped.columns else ""
+            print(f"Excluded {int(non_cand.sum())} parcel(s){area} whose own class is "
+                  f"{sorted(NON_CANDIDATE_LAND_COVER)} from the reallocation target set "
+                  "-- fixed context, not candidates. By class:")
+            for cls, grp in dropped.groupby("land_cover_class"):
+                crops = grp["crop"].str.upper().value_counts().head(4).to_dict() if "crop" in grp.columns else {}
+                print(f"    {cls}: {len(grp)} parcel(s); most common crop names: {crops}")
+        remaining = remaining.loc[~non_cand]
+    if exclude_missing_carbon and "carbon_t_c_per_ha_mean" in remaining.columns:
+        # Parcels with NO carbon baseline at all (NaN). The search refuses to
+        # run with them, while score_scenario() silently skips them but still
+        # counts their area in the disruption denominator -- so any path that
+        # did not drop them first (greedy, random) was scored on a subtly
+        # different problem. Dropping them HERE, in the one function every
+        # method calls, makes the candidate set identical everywhere.
+        missing = remaining["carbon_t_c_per_ha_mean"].isna()
+        if missing.any():
+            print(f"Excluded {int(missing.sum())} parcel(s) with no assigned carbon baseline "
+                  f"from the reallocation target set: {sorted(remaining.loc[missing, 'parcel_id'].tolist())} "
+                  "-- fixed context, not candidates.")
+            remaining = remaining.loc[~missing]
+    remaining_ids = remaining["parcel_id"].tolist()
 
     if exclude_likely_commonage:
         commonage_ids = flag_likely_commonage(remaining_ids, combined)
@@ -213,14 +320,9 @@ def score_scenario(parcel_ids: list[int], new_classes: dict, combined: gpd.GeoDa
     def _carbon_at_policy_year(row):
         if row["new_class"] not in branch_carbon_means or pd.isna(row["carbon_t_c_per_ha_mean"]):
             return np.nan
-        target_stock = hybrid_transition_target_stock(
+        return policy_year_stock(
             row["land_cover_class"], row["new_class"],
             row["carbon_t_c_per_ha_mean"], branch_carbon_means,
-        )
-        return carbon_at_year(
-            row["land_cover_class"], row["new_class"],
-            row["carbon_t_c_per_ha_mean"], target_stock,
-            YEARS_TO_POLICY_TARGET,
         )
 
     region["new_carbon_per_ha"] = region.apply(_carbon_at_policy_year, axis=1)

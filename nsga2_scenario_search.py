@@ -46,8 +46,7 @@ from sample_reallocation import load_model_and_graph, sample_reallocation
 from generate_scenarios import (
     load_area_and_baseline, filter_reallocatable, score_scenario,
 )
-from carbon_time_dynamics import carbon_at_year, YEARS_TO_POLICY_TARGET
-from carbon_transition_delta import hybrid_transition_target_stock
+from carbon_time_dynamics import policy_year_stock, YEARS_TO_POLICY_TARGET
 
 
 def build_lookup_tables(parcel_ids, combined, branch_means, branch_stds, per_parcel_labels):
@@ -93,12 +92,12 @@ def build_lookup_tables(parcel_ids, combined, branch_means, branch_stds, per_par
         source_class = baseline_class_by_pid[pid]
         baseline_stock = baseline_carbon_per_ha[p]
         for idx, cls in enumerate(labels):
-            target_stock = hybrid_transition_target_stock(
+            # policy_year_stock() is the SINGLE definition of what a move earns,
+            # shared with score_scenario() and greedy's ranking; keeping this
+            # call (not a local re-implementation) is what stops the methods
+            # drifting apart. test_scoring_consistency.py enforces it.
+            padded_carbon_lookup[p, idx] = policy_year_stock(
                 source_class, cls, baseline_stock, branch_means,
-            )
-            padded_carbon_lookup[p, idx] = carbon_at_year(
-                source_class, cls, baseline_stock, target_stock,
-                YEARS_TO_POLICY_TARGET,
             )
             padded_std_lookup[p, idx] = branch_stds.get(cls, 0.0)
         baseline_cls = source_class
@@ -610,7 +609,7 @@ if __name__ == "__main__":
     all_fronts = {}
     for seed in [1, 2, 3, 4]:
         print(f"\n{'='*20} SEED {seed} {'='*20}")
-        result, pareto_front, scenario_details = run_nsga2_search(parcel_ids, n_generations=200, pop_size=200, seed=seed)
+        result, pareto_front, scenario_details = run_nsga2_search(parcel_ids, n_generations=300, pop_size=300, seed=seed)
         all_fronts[seed] = pareto_front
 
     print(f"\n{'='*20} SUMMARY ACROSS {len(all_fronts)} SEEDS {'='*20}")

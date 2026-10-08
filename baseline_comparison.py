@@ -40,11 +40,32 @@ import numpy as np
 import pandas as pd
 
 from generate_scenarios import load_area_and_baseline, filter_reallocatable, score_scenario
-from carbon_time_dynamics import carbon_at_year, YEARS_TO_POLICY_TARGET
+from carbon_time_dynamics import policy_year_stock, YEARS_TO_POLICY_TARGET
 
 REALISTIC_TARGET_CLASSES = ["tillage", "grassland", "forestry"]
 
 TARGET_DISRUPTION_LEVELS = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+
+
+def best_realistic_target(current_class, own_baseline, branch_means):
+    """Greedy's per-parcel choice: the realistic target class with the highest
+    per-hectare gain (t C/ha at YEARS_TO_POLICY_TARGET), and that gain.
+
+    Module-level, and built on carbon_time_dynamics.policy_year_stock -- the
+    single definition of what a move earns, shared with score_scenario() --
+    so test_scoring_consistency.py can verify it against the scorer and the
+    NSGA-II lookup table. (It used to be an inner function with its own copy
+    of the formula; when the SOLUM hybrid was wired into the scorer but not
+    into this copy, greedy ranked parcels almost in reverse of what the
+    scorer rewards.)"""
+    gains = {
+        cls: policy_year_stock(current_class, cls, own_baseline, branch_means) - own_baseline
+        for cls in REALISTIC_TARGET_CLASSES if cls != current_class
+    }
+    if not gains:
+        return current_class, 0.0
+    best_cls = max(gains, key=gains.get)
+    return best_cls, gains[best_cls]
 
 
 def random_baseline(parcel_ids, combined, branch_means, branch_stds,
@@ -66,7 +87,11 @@ def random_baseline(parcel_ids, combined, branch_means, branch_stds,
     for _, row in region.iterrows():
         pid = row["parcel_id"]
         if to_change.loc[row.name]:
-            new_classes[pid] = rng.choice(REALISTIC_TARGET_CLASSES)
+            # A "reallocation" must actually change the class: drawing from all
+            # three realistic classes let a parcel be "reallocated" to its own
+            # class, which used up budget without changing anything.
+            options = [c for c in REALISTIC_TARGET_CLASSES if c != row["land_cover_class"]]
+            new_classes[pid] = rng.choice(options)
         else:
             new_classes[pid] = row["land_cover_class"]
 
@@ -75,46 +100,49 @@ def random_baseline(parcel_ids, combined, branch_means, branch_stds,
     return result, new_classes
 
 
-def greedy_baseline(parcel_ids, combined, branch_means, branch_stds, disruption_fraction):
+def greedy_baseline(parcel_ids, combined, branch_means, branch_stds, disruption_fraction, fill=False):
     """Returns (score_result, new_classes) -- see random_baseline()'s
-    docstring for what new_classes is and why it's returned."""
+    docstring for what new_classes is and why it's returned.
+
+    Two selection rules over the same density ranking:
+      fill=False ("stop"): convert parcels in descending gain per ha and STOP at the first one that
+          would overshoot the budget. Its result depends on how EXACT ties are ordered (on the
+          case-study region the spread over tie orders was up to 9% at the 0.1 budget), so it is
+          reported with its tie-break, never alone.
+      fill=True: the same, but SKIP a parcel that does not fit and keep scanning, so small parcels
+          fill the remaining budget. Far less sensitive to tie order and within a fraction of a
+          percent of the exact optimum on the case-study region: the strong baseline."""
     region = combined[combined["parcel_id"].isin(parcel_ids)].copy()
 
-    # For each parcel, find its single BEST realistic target class and
-    # the resulting per-ha gain, using the SAME time-resolved objective
-    # NSGA-II is scored on (carbon_at_year, not the raw branch-mean
-    # gap) -- otherwise greedy would be ranking its choices by one
-    # objective (eventual gain) while being scored on another (gain
-    # realized by YEARS_TO_POLICY_TARGET), understating the strongest
-    # fair version of this baseline.
-    def best_realistic_target(row):
-        current = row["land_cover_class"]
-        own_baseline = row["carbon_t_c_per_ha_mean"]
-        gains = {
-            cls: carbon_at_year(current, cls, own_baseline, branch_means[cls], YEARS_TO_POLICY_TARGET) - own_baseline
-            for cls in REALISTIC_TARGET_CLASSES if cls != current
-        }
-        if not gains:
-            return current, 0.0
-        best_cls = max(gains, key=gains.get)
-        return best_cls, gains[best_cls]
-
+    # Ranking uses best_realistic_target() below, which calls policy_year_stock():
+    # the SAME function score_scenario() scores with, so ranking and scoring cannot disagree.
     region[["best_target", "gain_per_ha"]] = region.apply(
-        lambda r: pd.Series(best_realistic_target(r)), axis=1
+        lambda r: pd.Series(best_realistic_target(r["land_cover_class"], r["carbon_t_c_per_ha_mean"], branch_means)), axis=1
     )
 
     # Greedy: convert parcels in order of DESCENDING gain_per_ha until
     # the disruption budget (fraction of total region area) is hit.
-    region = region.sort_values("gain_per_ha", ascending=False)
-    region["cum_area_frac"] = region["area_ha"].cumsum() / region["area_ha"].sum()
-
+    # Many parcels have EXACTLY equal gain per ha (carbon baselines come from soil-association
+    # values, so parcels of one association and class tie). Sorting by gain alone leaves the
+    # order among ties arbitrary, and the budget boundary then falls on a different parcel
+    # depending on the sort implementation: the same rule gave results differing by up to ~1%.
+    # Ties are broken by parcel_id (ascending), on a key rounded to 1e-9 t C/ha so float noise
+    # cannot reorder them. mckp_tools.solve_greedy uses the identical rule.
+    region["_density_key"] = region["gain_per_ha"].round(9)
+    region = region.sort_values(["_density_key", "parcel_id"], ascending=[False, True], kind="mergesort")
+    cap = disruption_fraction * float(region["area_ha"].sum())      # hectares that may change
+    used, stopped = 0.0, False
     new_classes = {}
     for _, row in region.iterrows():
         pid = row["parcel_id"]
-        if row["cum_area_frac"] <= disruption_fraction and row["gain_per_ha"] > 0:
-            new_classes[pid] = row["best_target"]
-        else:
-            new_classes[pid] = row["land_cover_class"]
+        if row["gain_per_ha"] > 0 and not stopped:
+            if used + row["area_ha"] <= cap + 1e-12:
+                new_classes[pid] = row["best_target"]
+                used += row["area_ha"]
+                continue
+            if not fill:
+                stopped = True            # the "stop" rule: the first parcel that does not fit ends the conversion
+        new_classes[pid] = row["land_cover_class"]
 
     result = score_scenario(parcel_ids, new_classes, combined, branch_means, branch_stds,
                             tillage_yield_mean=0.0, tillage_yield_std=0.0, grassland_index_std=0.0)
@@ -163,15 +191,22 @@ def run_comparison(parcel_ids, n_random_seeds=5, combined=None, branch_means=Non
             "actual_disruption": greedy_result["disruption_fraction"],
             "carbon_delta_t": greedy_result["carbon_delta_vs_baseline_t"],
         })
+        fill_result, _ = greedy_baseline(parcel_ids, combined, branch_means, branch_stds, target_disruption, fill=True)
+        rows.append({
+            "method": "greedy_fill_heuristic", "target_disruption": target_disruption,
+            "actual_disruption": fill_result["disruption_fraction"],
+            "carbon_delta_t": fill_result["carbon_delta_vs_baseline_t"],
+        })
 
-        random_gains = [
+        random_results = [
             random_baseline(parcel_ids, combined, branch_means, branch_stds,
-                            target_disruption, seed=s)[0]["carbon_delta_vs_baseline_t"]
+                            target_disruption, seed=s)[0]
             for s in range(n_random_seeds)
         ]
+        random_gains = [r["carbon_delta_vs_baseline_t"] for r in random_results]
         rows.append({
             "method": "random_baseline", "target_disruption": target_disruption,
-            "actual_disruption": target_disruption,  # approx, random selection targets this directly
+            "actual_disruption": float(np.mean([r["disruption_fraction"] for r in random_results])),
             "carbon_delta_t": float(np.mean(random_gains)),
             "carbon_delta_t_std_across_seeds": float(np.std(random_gains)),
         })
@@ -213,20 +248,21 @@ def export_scenario_details(parcel_ids, combined, branch_means, branch_stds,
     rows = []
 
     for target_disruption in TARGET_DISRUPTION_LEVELS:
-        greedy_result, greedy_new_classes = greedy_baseline(
-            parcel_ids, combined, branch_means, branch_stds, target_disruption,
-        )
         scenario_id = f"{target_disruption:.1f}"
-        for pid in parcel_ids:
-            original = original_class_by_pid[pid]
-            assigned = greedy_new_classes[pid]
-            rows.append({
-                "method": "greedy", "scenario_id": scenario_id,
-                "disruption_fraction": greedy_result["disruption_fraction"],
-                "carbon_delta_vs_baseline_t": greedy_result["carbon_delta_vs_baseline_t"],
-                "parcel_id": pid, "original_class": original, "assigned_class": assigned,
-                "changed": assigned != original,
-            })
+        for method, fill in (("greedy", False), ("greedy_fill", True)):
+            greedy_result, greedy_new_classes = greedy_baseline(
+                parcel_ids, combined, branch_means, branch_stds, target_disruption, fill=fill,
+            )
+            for pid in parcel_ids:
+                original = original_class_by_pid[pid]
+                assigned = greedy_new_classes[pid]
+                rows.append({
+                    "method": method, "scenario_id": scenario_id,
+                    "disruption_fraction": greedy_result["disruption_fraction"],
+                    "carbon_delta_vs_baseline_t": greedy_result["carbon_delta_vs_baseline_t"],
+                    "parcel_id": pid, "original_class": original, "assigned_class": assigned,
+                    "changed": assigned != original,
+                })
 
         for s in range(n_random_seeds):
             random_result, random_new_classes = random_baseline(
@@ -246,7 +282,7 @@ def export_scenario_details(parcel_ids, combined, branch_means, branch_stds,
 
     details = pd.DataFrame(rows)
     details.to_parquet(out_path, index=False)
-    print(f"Exported per-parcel scenario detail for greedy ({len(TARGET_DISRUPTION_LEVELS)} scenarios) "
+    print(f"Exported per-parcel scenario detail for greedy and greedy_fill ({len(TARGET_DISRUPTION_LEVELS)} scenarios each) "
           f"and random ({len(TARGET_DISRUPTION_LEVELS) * n_random_seeds} scenarios) "
           f"({len(details)} rows) to {out_path}")
     return details

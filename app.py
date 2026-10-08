@@ -20,8 +20,6 @@ equivalent to be added to baseline_comparison.py for the real exporters):
 Swap DETAILS_PATH / GEOMETRY_PATH below to point at real exported files
 once available; everything else is schema-driven and needs no changes.
 """
-import os
-import glob
 import streamlit as st
 import pandas as pd
 import geopandas as gpd
@@ -31,6 +29,8 @@ import plotly.express as px
 
 st.set_page_config(layout="wide", page_title="LandFuture DSS Scenario Viewer")
 
+import glob
+import os
 
 # Real exports, once both scripts have been run against the real region:
 #   - nsga2_scenario_search.py's export_scenario_details() writes
@@ -41,10 +41,8 @@ st.set_page_config(layout="wide", page_title="LandFuture DSS Scenario Viewer")
 # so the app still runs standalone for development/testing.
 REAL_NSGA2_GLOB = "data/scenario_details_seed*.parquet"
 REAL_BASELINES_PATH = "data/scenario_details_baselines.parquet"
-# run extract_region_geometry.py once first
-REAL_GEOMETRY_PATH = "data/region_geometry.gpkg"
-# guard against accidentally pointing this at the full national file
-MAX_SANE_PARCEL_COUNT = 5000
+REAL_GEOMETRY_PATH = "data/region_geometry.gpkg"  # run extract_region_geometry.py once first
+MAX_SANE_PARCEL_COUNT = 5000  # guard against accidentally pointing this at the full national file
 
 SYNTHETIC_DETAILS_PATH = "data/synthetic_scenario_details.parquet"
 SYNTHETIC_GEOMETRY_PATH = "data/synthetic_parcels.gpkg"
@@ -55,7 +53,7 @@ CLASS_COLORS = {
     "forestry": "#2E5E3E",
     "peatland": "#8B5E3C",
 }
-METHOD_COLORS = {"nsga2": "#534AB7", "greedy": "#993C1D", "random": "#888780"}
+METHOD_COLORS = {"nsga2": "#534AB7", "greedy": "#993C1D", "greedy_fill": "#D4891A", "random": "#888780"}
 
 
 @st.cache_data
@@ -128,8 +126,7 @@ def render_scenario_map(ax, geometry, details, method, scenario_id, color_by):
     shown here as its own "not reallocatable" category rather than
     silently dropped or crashing on NaN.
     """
-    scenario_rows = details[(details["method"] == method) & (
-        details["scenario_id"] == scenario_id)]
+    scenario_rows = details[(details["method"] == method) & (details["scenario_id"] == scenario_id)]
     merged = geometry.merge(scenario_rows, on="parcel_id", how="left")
     not_in_scenario = merged["assigned_class"].isna()
 
@@ -137,14 +134,12 @@ def render_scenario_map(ax, geometry, details, method, scenario_id, color_by):
         for cls, color in CLASS_COLORS.items():
             subset = merged[merged["assigned_class"] == cls]
             if len(subset):
-                subset.plot(ax=ax, color=color, edgecolor="white",
-                            linewidth=0.3, label=cls)
+                subset.plot(ax=ax, color=color, edgecolor="white", linewidth=0.3, label=cls)
         excluded = merged[not_in_scenario]
         if len(excluded):
             excluded.plot(ax=ax, color=NOT_REALLOCATABLE_COLOR, edgecolor="white",
                           linewidth=0.3, label="not reallocatable")
-        ax.legend(loc="upper left", bbox_to_anchor=(
-            1.0, 1.0), fontsize=8, frameon=False)
+        ax.legend(loc="upper left", bbox_to_anchor=(1.0, 1.0), fontsize=8, frameon=False)
     else:  # changed / unchanged
         # Explicit == comparisons, not `~merged["changed"]`: the "changed"
         # column is NaN (a float), not a clean bool, for excluded parcels,
@@ -155,16 +150,13 @@ def render_scenario_map(ax, geometry, details, method, scenario_id, color_by):
         changed = merged[merged["changed"] == True]
         excluded = merged[not_in_scenario]
         if len(unchanged):
-            unchanged.plot(ax=ax, color="#E5E3DC",
-                           edgecolor="white", linewidth=0.3, label="unchanged")
+            unchanged.plot(ax=ax, color="#E5E3DC", edgecolor="white", linewidth=0.3, label="unchanged")
         if len(changed):
-            changed.plot(ax=ax, color="#C0392B", edgecolor="white",
-                         linewidth=0.3, label="changed")
+            changed.plot(ax=ax, color="#C0392B", edgecolor="white", linewidth=0.3, label="changed")
         if len(excluded):
             excluded.plot(ax=ax, color=NOT_REALLOCATABLE_COLOR, edgecolor="white",
-                          linewidth=0.3, label="not reallocatable")
-        ax.legend(loc="upper left", bbox_to_anchor=(
-            1.0, 1.0), fontsize=8, frameon=False)
+                         linewidth=0.3, label="not reallocatable")
+        ax.legend(loc="upper left", bbox_to_anchor=(1.0, 1.0), fontsize=8, frameon=False)
 
     ax.set_axis_off()
     row = scenario_rows.iloc[0]
@@ -205,18 +197,14 @@ st.plotly_chart(fig, use_container_width=True)
 st.divider()
 st.subheader("Scenario map")
 
-color_by = st.radio("Color parcels by", [
-                    "assigned_class", "changed"], horizontal=True)
+color_by = st.radio("Color parcels by", ["assigned_class", "changed"], horizontal=True)
 compare_mode = st.checkbox("Compare two scenarios side by side")
 
 methods_available = sorted(summary["method"].unique())
 
-
 def scenario_picker(label, key_prefix):
-    method = st.selectbox(f"{label} -- method",
-                          methods_available, key=f"{key_prefix}_method")
-    options = summary[summary["method"] ==
-                      method].sort_values("disruption_fraction")
+    method = st.selectbox(f"{label} -- method", methods_available, key=f"{key_prefix}_method")
+    options = summary[summary["method"] == method].sort_values("disruption_fraction")
     choice = st.selectbox(
         f"{label} -- scenario",
         options["scenario_id"],
@@ -228,7 +216,6 @@ def scenario_picker(label, key_prefix):
     )
     return method, choice
 
-
 if compare_mode:
     col1, col2 = st.columns(2)
     with col1:
@@ -239,17 +226,14 @@ if compare_mode:
     map_col1, map_col2 = st.columns(2)
     with map_col1:
         fig_a, ax_a = plt.subplots(figsize=(5, 5))
-        render_scenario_map(ax_a, geometry, details,
-                            method_a, scenario_a, color_by)
+        render_scenario_map(ax_a, geometry, details, method_a, scenario_a, color_by)
         st.pyplot(fig_a)
     with map_col2:
         fig_b, ax_b = plt.subplots(figsize=(5, 5))
-        render_scenario_map(ax_b, geometry, details,
-                            method_b, scenario_b, color_by)
+        render_scenario_map(ax_b, geometry, details, method_b, scenario_b, color_by)
         st.pyplot(fig_b)
 else:
     method_a, scenario_a = scenario_picker("Scenario", "single")
     fig_a, ax_a = plt.subplots(figsize=(7, 7))
-    render_scenario_map(ax_a, geometry, details,
-                        method_a, scenario_a, color_by)
+    render_scenario_map(ax_a, geometry, details, method_a, scenario_a, color_by)
     st.pyplot(fig_a)

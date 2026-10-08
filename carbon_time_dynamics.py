@@ -40,6 +40,8 @@ WHAT'S REAL VS. ASSUMED -- read before trusting these numbers:
 import numpy as np
 from scipy.stats import gamma as gamma_dist
 
+from carbon_transition_delta import hybrid_transition_target_stock
+
 # --- Afforestation curve parameters ---
 AFFORESTATION_PEAK_YEAR = 15          # REAL, cited
 AFFORESTATION_PEAK_RATE_T_CO2 = 13.0  # REAL, cited
@@ -154,3 +156,26 @@ if __name__ == "__main__":
     print(f"\nModel's implied peak rate: {result['implied_peak_rate_t_co2']:.1f} t CO2/ha/yr")
     print(f"Cited literature peak rate: {result['cited_peak_rate_t_co2']:.1f} t CO2/ha/yr")
     print(f"(These are independent checks, not forced to match -- see module docstring)")
+
+
+def policy_year_stock(source_class, target_class, baseline_stock, branch_means,
+                      years=YEARS_TO_POLICY_TARGET):
+    """
+    THE single definition of what a move earns: this parcel's carbon stock
+    (t C/ha) `years` after changing from source_class to target_class,
+    using the SOLUM-hybrid target (carbon_transition_delta.
+    hybrid_transition_target_stock) and the time-resolved trajectory
+    (carbon_at_year).
+
+    Every place that asks "how much carbon does this move earn?" must call
+    THIS, not re-implement it: generate_scenarios.score_scenario() (scores
+    greedy/random), baseline_comparison's greedy ranking, and (once it is
+    switched over) nsga2_scenario_search.build_lookup_tables(). That
+    formula was previously copy-pasted in three places, and on two
+    occasions (time dynamics, then the SOLUM hybrid) one copy -- greedy's
+    ranking -- was not updated, which handicapped the baseline and
+    produced a spurious NSGA-II "advantage" both times.
+    test_scoring_consistency.py fails if any path drifts from this.
+    """
+    target_stock = hybrid_transition_target_stock(source_class, target_class, baseline_stock, branch_means)
+    return carbon_at_year(source_class, target_class, baseline_stock, target_stock, years)
