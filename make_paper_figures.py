@@ -4,7 +4,8 @@ Figures for the manuscript, regenerated from the repository's own result files.
     python make_paper_figures.py [--data-dir data] [--out-dir figures]
 
 Reads (all written by the pipeline): exact_front.csv, gain_uncertainty_generic.csv,
-gain_uncertainty_data.csv, granularity_gap.csv.
+gain_uncertainty_data.csv, granularity_gap.csv, coupled_objective.csv (Figure 5; written by
+experiment_coupled_objective.py run with --nsga --nsga-seeded --seeds 1 2 3 4 --pop 300 --generations 1000).
 
 Two sets of numbers in Figure 2 are NOT in any CSV and are transcribed from printed output of the
 final run, so update them if you rerun (they are marked TRANSCRIBED below):
@@ -153,7 +154,39 @@ def figures_2_to_4():
 
 
 
+def figure5():
+    """Coupled objective: gap to the exact optimum of J against the boundary penalty, one panel per budget."""
+    d = pd.read_csv(DATA + "coupled_objective.csv")
+    lams = sorted(d.lam_f.unique()); xs = np.arange(len(lams)); CAP = 105
+    series = [("greedy (paper)", "Paper's greedy (fill)", "#2E8B6B", "o", "-"),
+              ("aware + polish", "Boundary-aware greedy + local search", "#C26A4A", "s", "-")]
+    fig, ax = plt.subplots(1, 3, figsize=(7.4, 2.9), sharey=True)
+    for k, bud in enumerate(sorted(d.budget.unique())):
+        a = ax[k]; sub = d[d.budget == bud]
+        for key, lab, c, mk, ls in series:
+            v = sub[sub.method == key].set_index("lam_f").gap_to_bound_pct.reindex(lams).values
+            a.plot(xs, np.minimum(v, CAP), marker=mk, ms=4, color=c, lw=1.5, ls=ls, label=lab)
+            for x, y in zip(xs, v):
+                if y > CAP: a.text(x - 0.12, CAP, f"{y:.0f}", ha="right", va="center", fontsize=5.8, color=c)
+        pl = sub[sub.method.str.contains("plain")].groupby("lam_f").gap_to_bound_pct
+        lo, hi, mu = pl.min().reindex(lams).values, pl.max().reindex(lams).values, pl.mean().reindex(lams).values
+        a.fill_between(xs, lo, hi, color="#534AB7", alpha=0.18, lw=0)
+        a.plot(xs, mu, marker="^", ms=4, color="#534AB7", lw=1.5, label="NSGA-II, random start (mean, range of 4 seeds)")
+        sd = sub[sub.method.str.contains("seeded")].groupby("lam_f").gap_to_bound_pct.max().reindex(lams).values
+        a.plot(xs, sd, marker="D", ms=3.6, mfc="white", color="#534AB7", lw=1.0, ls="--", label="NSGA-II, seeded with the greedy solutions")
+        a.axhline(0, color="#222", lw=0.8)
+        a.set_xticks(xs); a.set_xticklabels([f"{l:g}" for l in lams]); a.set_ylim(-3, CAP + 3)
+        a.set_title(f"budget {bud:g}", fontsize=8.2, loc="left"); a.set_xlabel("Boundary penalty λ")
+    ax[0].set_ylabel("Gap to the exact optimum (%)")
+    h, l = ax[0].get_legend_handles_labels()
+    fig.legend(h, l, loc="lower center", ncol=2, frameon=False, fontsize=6.4, bbox_to_anchor=(0.5, -0.02))
+    fig.tight_layout(rect=(0, 0.14, 1, 1))
+    fig.savefig(os.path.join(OUT, "fig5_coupled.png"), dpi=220, facecolor="white"); plt.close(fig)
+
+
 if __name__ == "__main__":
     figure1()
     figures_2_to_4()
+    if os.path.exists(DATA + "coupled_objective.csv"):
+        figure5()
     print(f"figures written to {OUT}/")

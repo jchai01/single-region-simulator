@@ -1,5 +1,5 @@
 {
-  "delivery": "2026-10-07 (c): final-results edition + manuscript figures",
+  "delivery": "2026-10-23: coupled objective written up (manuscript_v3, Figure 5)",
   "files": {
     "carbon_time_dynamics.py": {
       "sha256": "b90e2e9e7acdcb275853678f2a2215a7bb6638c3612e469a18677e479fb5d67e",
@@ -78,12 +78,24 @@
       "role": "one-time fix for old seed exports"
     },
     "app.py": {
-      "sha256": "b6c29ea2f7ef8b85d7f96f7bf4fb5ccc5c74038a121bdc2cd3a621a79a242b8a",
+      "sha256": "1cbfdcec20a0fdf382fbcae26fedaeb5ba2511b4dda462993440cd541c2cdb10",
       "role": "Streamlit scenario viewer"
     },
     "make_paper_figures.py": {
-      "sha256": "41846639066daec3fe139c3c82b70fe01b9aa9c00e2f6bc6f3dd255a179fde9e",
+      "sha256": "29414e2d0a61b89f0b1b90ea680db139a15c921c37f79f31b558665b8d1b67a5",
       "role": "regenerates the manuscript figures from data/*.csv"
+    },
+    "coupled_objective.py": {
+      "sha256": "a3614cf41fb59ecd871f4ca1074e27d701d18b9f04e85ffa2b116f5bf6327198",
+      "role": "coupled objective (carbon minus boundary penalty): exact MILP, greedy variants, local search, 3-objective NSGA-II"
+    },
+    "experiment_coupled_objective.py": {
+      "sha256": "e39ac94f48a59a9e8a65f0380b704ed8e61700e6d93efb327b21e5ec9028862d",
+      "role": "where search methods start to matter: runs the coupled-objective comparison (writes data/coupled_objective.csv)"
+    },
+    "test_coupled.py": {
+      "sha256": "41dfd5e1b44e451d09f9ca3ef8b27b211bd75425d3a28bd527025ca88c3e1e6e",
+      "role": "tests for the coupled objective (brute force, references); run: python test_coupled.py"
     }
   }
 }
